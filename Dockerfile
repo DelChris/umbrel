@@ -21,7 +21,8 @@ ADD https://github.com/getumbrel/umbrel.git#${VERSION_ARG} /src
 
 # Apply custom patches (fails loudly when upstream changed underneath them)
 COPY patches /patches
-RUN cd /src && git apply --verbose /patches/*.patch
+WORKDIR /src
+RUN git apply --verbose /patches/*.patch
 
 #########################################################################
 # ui build stage
@@ -132,6 +133,8 @@ RUN brew install --formula --force-bottle watchman && \
     test "$(watchman -v)" = "${WATCHMAN_VERSION}" && \
     brew cleanup --prune=all
 
+# Build-only stage: only /opt/linuxbrew is copied into the final image
+# hadolint ignore=DL3002
 USER root
 
 # Relocate the Homebrew prefix so it no longer depends on the build user's home
