@@ -1,155 +1,157 @@
 name: Build
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
+  push:
+    tags:
+      - 'v*'
 
 concurrency:
-  group: build
+  group: build-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   shellcheck:
     name: Test
     uses: ./.github/workflows/check.yml
+
   build:
-    name: Build
+    name: Build (${{ matrix.platform }})
     needs: shellcheck
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
-      actions: write
-      packages: write
       contents: read
+      packages: write
     steps:
-      - 
-        name: Run graphql query to get tag
-        uses: octokit/graphql-action@v3.x
-        id: latest_tag
-        with:
-          variables: |
-            repo: ${{ github.event.repository.name }}
-            owner: getumbrel
-          query: |
-            query tag($owner: String!, $repo: String!) {
-              repository(owner: $owner, name: $repo) {
-                refs(refPrefix: "refs/tags/", last: 1, orderBy: {field: TAG_COMMIT_DATE, direction: ASC}) {
-                  edges {
-                    node {
-                      name
-               } } } } }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - 
-        name: Parse tag from query output
-        run: |
-          #!/bin/bash
-          latest_tag=$(echo '${{ steps.latest_tag.outputs.data }}' | jq '.repository.refs.edges[][].name' -r)
-          [ -z "$latest_tag" ] && echo "Tag not found!" && exit 1
-          [[ "$latest_tag" == "null" ]] && echo "Tag not found!" && exit 1
-          [[ "$latest_tag" = v* ]] && latest_tag="${latest_tag:1}"
-          echo "Found tag: \"${latest_tag}\"" 
-          latest_version="${latest_tag%-*}"
-          major="${latest_version%%.*}"
-          minor="${latest_version#*.}"
-          minor="${minor%%.*}"
-          echo "latest_tag=$latest_tag" >> $GITHUB_ENV
-          echo "latest_minor=$major.$minor" >> $GITHUB_ENV
-      - 
-        name: Check if the tag exists locally
-        uses: action-pack/tag-exists@v1
-        id: checkTag
-        with: 
-          tag: 'v${{ env.latest_tag }}'
-      -
-        name: Finish when found
-        run: |
-          #!/bin/bash
-          beta="false"
-          
-          val="${{ steps.checkTag.outputs.exists }}"
-
-          [[ "${{ env.latest_tag }}" == *"rc"* ]] && beta="true"
-          [[ "${{ env.latest_tag }}" == *"beta"* ]] && beta="true"
-          [[ "${{ env.latest_tag }}" == *"test"* ]] && val="true"
-          [[ "${{ env.latest_tag }}" == *"alpha"* ]] && val="true"
-
-          echo "beta=${beta}" >> $GITHUB_ENV
-          echo "exists=${val}" >> $GITHUB_ENV
       -
         name: Checkout
-        if: env.exists == 'false'
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+      -
+        name: Read the umbrelOS version
+        run: |
+          #!/bin/bash
+          # The first VERSION_ARG in the Dockerfile is the upstream umbrelOS tag the patches target
+          umbrel_version=$(grep -m1 -oP '^ARG VERSION_ARG="\K[^"]+' Dockerfile)
+          [ -z "$umbrel_version" ] && echo "umbrelOS version not found!" && exit 1
+          echo "UMBREL_VERSION=$umbrel_version" >> "$GITHUB_ENV"
+          echo "PLATFORM_PAIR=${{ matrix.platform }}" | tr '/' '-' >> "$GITHUB_ENV"
+      -
+        name: Lowercase the image name
+        run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
       -
         name: Docker metadata
-        if: env.exists == 'false'
         id: meta
         uses: docker/metadata-action@v6
         with:
-          context: git
-          images: |
-            ${{ secrets.DOCKERHUB_REPO }}
-            ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ env.latest_minor }},enable=${{ env.beta == 'false' }}
-            type=raw,value=latest,priority=100,enable=${{ env.beta == 'false' }}
-            type=raw,value=${{ env.latest_tag }},priority=250
-          labels: |
-            org.opencontainers.image.title=${{ vars.NAME }}
-        env:
-          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index     
-      - 
+          images: ${{ env.IMAGE }}
+      -
         name: Set up Docker Buildx
-        if: env.exists == 'false'
         uses: docker/setup-buildx-action@v4
       -
-        name: Login into Docker Hub
-        if: env.exists == 'false'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      -
         name: Login to GitHub Container Registry
-        if: env.exists == 'false'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       -
-        name: Build Docker image
-        if: env.exists == 'false'
+        name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
+          platforms: ${{ matrix.platform }}
           provenance: false
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
           build-args: |
-            VERSION_ARG=${{ steps.meta.outputs.version }}
+            VERSION_ARG=${{ env.UMBREL_VERSION }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+      -
+        name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      -
+        name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      -
+        name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      -
+        name: Lowercase the image name
+        run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
+      -
+        name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          # Pre-releases (v2.0.0-beta.1) get their exact version and beta.
+          # Releases also get major.minor and latest.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=beta,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Create the multi-platform image
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+      -
+        name: Inspect the image
+        run: docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.meta.outputs.version }}"
       -
         name: Create a release
-        if: env.exists == 'false'
-        uses: action-pack/github-release@v2
-        with:
-          tag: "v${{ steps.meta.outputs.version }}"
-          title: "v${{ steps.meta.outputs.version }}"
-          token: ${{ secrets.REPO_ACCESS_TOKEN }}
-      -
-        name: Send mail
-        if: env.exists == 'false'
-        uses: action-pack/send-mail@v1
-        with:
-          to: ${{secrets.MAILTO}}
-          from: Github Actions <${{secrets.MAILTO}}>
-          connection_url: ${{secrets.MAIL_CONNECTION}}
-          subject: Build of ${{ github.event.repository.name }} v${{ steps.meta.outputs.version }} completed
-          body: |
-              The build job of ${{ github.event.repository.name }} v${{ steps.meta.outputs.version }} was completed successfully! 
-              
-              See https://github.com/${{ github.repository }}/actions for more information.
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prerelease=""
+          [[ "${{ github.ref_name }}" == *-* ]] && prerelease="--prerelease"
+          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" --generate-notes $prerelease

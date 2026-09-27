@@ -1,12 +1,43 @@
+# umbrelOS 2.0 for Docker (beta)
+#
+# Start:    docker compose up -d
+# Update:   docker compose pull && docker compose up -d
+# Stop:     docker compose down
+# Logs:     docker logs -f umbrel
+#
+# Dashboard: http://<host> (or https://<host> with a self-signed certificate)
+#
+# Apps and machine port forwards are published on the Docker host by small
+# relay containers (umbrel_ingress_* and umbrel_machine_*) that umbrelOS
+# creates and removes by itself.
+
+name: umbrel
+
 services:
   umbrel:
-    image: dockurr/umbrel
+    image: ghcr.io/delchris/umbrel:beta
     container_name: umbrel
+    # umbrelOS manages its apps through the host Docker daemon and needs to see
+    # their processes for CPU and memory usage
     pid: host
+    # Required by Machines (virtual machines): libvirt creates a bridge, tap
+    # devices and bind mounts, and QEMU uses /dev/kvm. Without it, umbrelOS runs
+    # normally and simply hides Machines.
+    privileged: true
     ports:
-      - 80:80
+      - 80:80 # Dashboard
+      - 443:443 # Dashboard (HTTPS)
+      - 2000:2000 # App login page for password-protected apps
     volumes:
-      - ./umbrel:/data
+      # All umbrelOS data: account, apps, files, machines. Override the location
+      # with UMBREL_DATA in a .env file next to this one.
+      - ${UMBREL_DATA:-./umbrel}:/data
       - /var/run/docker.sock:/var/run/docker.sock
     restart: always
+    # Lets umbrelOS stop its apps and shut down machines cleanly
     stop_grace_period: 1m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
