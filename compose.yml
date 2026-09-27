@@ -11,8 +11,6 @@
 # relay containers (umbrel_ingress_* and umbrel_machine_*) that umbrelOS
 # creates and removes by itself.
 
-name: umbrel
-
 services:
   umbrel:
     image: ghcr.io/delchris/umbrel:beta
