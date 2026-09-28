@@ -353,7 +353,7 @@ hasCapability() {
 
 nestCgroups() {
 
-  local controllers pid
+  local controller failed="" pid procs
 
   # With cgroup v2 and a private cgroup namespace, the container's processes
   # sit in the namespace root. A cgroup that holds processes cannot delegate
@@ -364,13 +364,25 @@ nestCgroups() {
   [[ "$(</proc/self/cgroup)" == "0::/" ]] || return 0
 
   mkdir -p /sys/fs/cgroup/init
-  while read -r pid; do
-    echo "$pid" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || :
-  done < /sys/fs/cgroup/cgroup.procs
 
-  controllers=$(sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers)
-  if ! echo "$controllers" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
-    warn "Failed to delegate cgroup controllers, machines may fail to start."
+  # Read the whole list before moving anything: the file changes while
+  # processes move, so reading it line by line skips entries. Repeat for
+  # processes started in the meantime.
+  for _ in 1 2 3 4 5; do
+    procs=$(</sys/fs/cgroup/cgroup.procs)
+    [ -z "$procs" ] && break
+    for pid in $procs; do
+      echo "$pid" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || :
+    done
+  done
+
+  # Delegate the controllers one by one so an unsupported one does not block the others
+  for controller in $(</sys/fs/cgroup/cgroup.controllers); do
+    echo "+$controller" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || failed+=" $controller"
+  done
+
+  if [ -n "$failed" ]; then
+    warn "Failed to delegate the cgroup controllers:$failed. Machines may fail to start."
   fi
 
   return 0
