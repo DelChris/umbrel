@@ -77,6 +77,14 @@ docker run -d --name umbrel --pid=host --privileged -p 80:80 -p 443:443 -p 2000:
 
   Use an absolute path or a path relative to the compose file. App data lives in the same folder.
 
+  If a folder inside it is a symbolic link to another disk (for example `home` pointing to a storage pool), also bind mount the target of the link at the same path:
+
+  ```yaml
+  volumes:
+    - /srv/umbrel:/data
+    - /mnt/storage:/mnt/storage
+  ```
+
 ### Which images does umbrelOS remove?
 
   umbrelOS periodically removes unused app images. In this container it only removes images it downloaded itself, never other images on the host.
