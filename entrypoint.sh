@@ -351,6 +351,31 @@ hasCapability() {
   (( (0x$caps >> $1) & 1 ))
 }
 
+nestCgroups() {
+
+  local controllers pid
+
+  # With cgroup v2 and a private cgroup namespace, the container's processes
+  # sit in the namespace root. A cgroup that holds processes cannot delegate
+  # the memory and io controllers to child groups, so libvirt fails to create
+  # the machine cgroups. Move them to a leaf group and delegate every
+  # controller, like docker:dind does. Host cgroup namespaces are left alone.
+  [ -f /sys/fs/cgroup/cgroup.controllers ] || return 0
+  [[ "$(</proc/self/cgroup)" == "0::/" ]] || return 0
+
+  mkdir -p /sys/fs/cgroup/init
+  while read -r pid; do
+    echo "$pid" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || :
+  done < /sys/fs/cgroup/cgroup.procs
+
+  controllers=$(sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers)
+  if ! echo "$controllers" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
+    warn "Failed to delegate cgroup controllers, machines may fail to start."
+  fi
+
+  return 0
+}
+
 startMachines() {
 
   local reason=""
@@ -383,6 +408,8 @@ startMachines() {
     export UMBREL_MACHINES_NO_NWFILTER=1
     warn "The kernel has no bridge netfilter, machines run without anti-spoofing filters."
   fi
+
+  nestCgroups
 
   # Machines never survive a container restart, drop the previous runtime state
   rm -rf /run/libvirt /run/umbrel-machines /var/lib/libvirt/swtpm
