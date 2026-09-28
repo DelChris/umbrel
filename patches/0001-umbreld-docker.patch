@@ -3477,10 +3477,16 @@ index 5c6c3b20..20b5d075 100644
  		}),
  })
 diff --git a/packages/umbreld/source/modules/system/system.ts b/packages/umbreld/source/modules/system/system.ts
-index 3ccfcfd5..4eca19e3 100644
+index 3ccfcfd5..9e9fe731 100644
 --- a/packages/umbreld/source/modules/system/system.ts
 +++ b/packages/umbreld/source/modules/system/system.ts
-@@ -14,13 +14,23 @@ import {escapeSpecialRegExpLiterals} from '../utilities/regexp.js'
+@@ -1,4 +1,5 @@
+ import os from 'node:os'
++import {execFileSync} from 'node:child_process'
+ import {isIPv4} from 'node:net'
+ import {randomBytes} from 'node:crypto'
+ import {setTimeout} from 'node:timers/promises'
+@@ -14,13 +15,23 @@ import {escapeSpecialRegExpLiterals} from '../utilities/regexp.js'
  import pWaitFor from 'p-wait-for'
  import {getGpuDeviceUsage, type GpuDeviceUsage} from '../hardware/gpu-usage.js'
  
@@ -3505,7 +3511,7 @@ index 3ccfcfd5..4eca19e3 100644
  	const temperature = cpuTemperature.main
  
  	// CPU temperature warnings are temporarily disabled for the umbrelOS 2.0 beta.
-@@ -264,42 +274,25 @@ export async function getMemoryUsage(umbreld: Umbreld): Promise<{
+@@ -264,42 +275,25 @@ export async function getMemoryUsage(umbreld: Umbreld): Promise<{
  	apps: MemoryUsage[]
  	machines: Array<{id: string; name: string; osId: string; used: number}>
  }> {
@@ -3557,7 +3563,7 @@ index 3ccfcfd5..4eca19e3 100644
  				}
  			} catch (error) {
  				umbreld.logger.error(`Error getting memory`, error)
-@@ -311,7 +304,7 @@ export async function getMemoryUsage(umbreld: Umbreld): Promise<{
+@@ -311,7 +305,7 @@ export async function getMemoryUsage(umbreld: Umbreld): Promise<{
  		}),
  	)
  
@@ -3566,7 +3572,7 @@ index 3ccfcfd5..4eca19e3 100644
  	const appsTotal = clampByteCount(apps.reduce((total, app) => total + app.used, 0))
  	const machinesTotal = clampByteCount(machineUsage.memory.reduce((total, machine) => total + machine.used, 0))
  	const system = clampByteCount(totalUsed - appsTotal - machinesTotal, totalUsed)
-@@ -325,6 +318,73 @@ export async function getMemoryUsage(umbreld: Umbreld): Promise<{
+@@ -325,6 +319,73 @@ export async function getMemoryUsage(umbreld: Umbreld): Promise<{
  	}
  }
  
@@ -3640,7 +3646,7 @@ index 3ccfcfd5..4eca19e3 100644
  type GpuAppUsage = {
  	id: string
  	used: number
-@@ -421,81 +481,158 @@ export function aggregateGpuUsage(rawDevices: GpuDeviceUsage[], pidToApp: Map<nu
+@@ -421,81 +482,158 @@ export function aggregateGpuUsage(rawDevices: GpuDeviceUsage[], pidToApp: Map<nu
  	}
  }
  
@@ -3764,13 +3770,13 @@ index 3ccfcfd5..4eca19e3 100644
 +		const [id, name] = line.trim().split(' ')
 +		if (id && name) ids.set(name, id)
 +	}
- 
--	// Calculate total CPU used by all processes
--	const totalUsed = processes.reduce((total, process) => total + process.cpu, 0)
++
 +	containerIdsCache = {time: Date.now(), ids}
 +	return ids
 +}
-+
+ 
+-	// Calculate total CPU used by all processes
+-	const totalUsed = processes.reduce((total, process) => total + process.cpu, 0)
 +async function computeCpuUsage(umbreld: Umbreld) {
 +	// Take a short sample when there is no recent snapshot to compare against
 +	let previous = lastCpuSnapshot
@@ -3846,7 +3852,7 @@ index 3ccfcfd5..4eca19e3 100644
  		totalUsed,
  		system,
  		apps,
-@@ -503,6 +640,31 @@ export async function getCpuUsage(umbreld: Umbreld): Promise<{
+@@ -503,6 +641,31 @@ export async function getCpuUsage(umbreld: Umbreld): Promise<{
  	}
  }
  
@@ -3878,7 +3884,7 @@ index 3ccfcfd5..4eca19e3 100644
  // TODO: For powercycle methods we will probably want to handle cleanly stopping
  // as much Umbrel stuff as possible ourselves before handing over to the OS.
  // This will give us more control over the order of things terminating and allow
-@@ -510,78 +672,40 @@ export async function getCpuUsage(umbreld: Umbreld): Promise<{
+@@ -510,78 +673,40 @@ export async function getCpuUsage(umbreld: Umbreld): Promise<{
  // umbreld gets killed.
  
  export async function shutdown(): Promise<boolean> {
@@ -3977,7 +3983,7 @@ index 3ccfcfd5..4eca19e3 100644
  }
  
  export async function isRaspberryPi() {
-@@ -609,108 +733,23 @@ export async function setupPiCpuGovernor(umbreld: Umbreld): Promise<void> {
+@@ -609,107 +734,62 @@ export async function setupPiCpuGovernor(umbreld: Umbreld): Promise<void> {
  }
  
  export async function hasWifi() {
@@ -4076,7 +4082,9 @@ index 3ccfcfd5..4eca19e3 100644
  export async function restoreWiFi(umbreld: Umbreld): Promise<void> {
 -	const wifiCredentials = await umbreld.store.get('settings.wifi')
 -	if (!wifiCredentials) return
--
++	return
++}
+ 
 -	while (true) {
 -		umbreld.logger.log(`Attempting to restore WiFi connection to ${wifiCredentials.ssid}...`)
 -		try {
@@ -4087,12 +4095,56 @@ index 3ccfcfd5..4eca19e3 100644
 -			umbreld.logger.error(`Failed to restore WiFi connection, retrying in 1 minute`, error)
 -			await setTimeout(1000 * 60)
 -		}
--	}
-+	return
++// Docker: the container only sees its own network. Read the host interfaces
++// instead, as umbrelOS does on bare metal, so the dashboard shows the host IPs
++// and the HTTPS certificate covers them. Needs pid: host (PID 1 is the host
++// init) and privileged; otherwise fall back to the container interfaces.
++function getHostNetworkInterfaces(): NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined {
++	if (!process.env.UMBREL_CONTAINER_NAME) return
++	try {
++		const output = execFileSync('nsenter', ['--target', '1', '--net', 'ip', '-json', '-4', 'address', 'show'], {
++			encoding: 'utf8',
++			stdio: ['ignore', 'pipe', 'ignore'],
++			timeout: 2000,
++		})
++		const links = JSON.parse(output) as Array<{
++			ifname: string
++			flags?: string[]
++			address?: string
++			addr_info?: Array<{family: string; local: string; prefixlen: number}>
++		}>
++		return Object.fromEntries(
++			links.map((link) => [
++				link.ifname,
++				(link.addr_info ?? [])
++					.filter((address) => address.family === 'inet')
++					.map(
++						(address): os.NetworkInterfaceInfo => ({
++							address: address.local,
++							netmask: '',
++							family: 'IPv4',
++							mac: link.address ?? '',
++							internal: link.flags?.includes('LOOPBACK') ?? false,
++							cidr: `${address.local}/${address.prefixlen}`,
++						}),
++					),
++			]),
++		)
++	} catch {
++		return
+ 	}
  }
  
- // Get IP addresses of the device
-@@ -778,81 +817,7 @@ type NetworkInterface = {
+@@ -744,7 +824,7 @@ export function getIpAddresses(): string[] {
+ 		/^169\.254\./,
+ 	]
+ 	return (
+-		Object.entries(os.networkInterfaces())
++		Object.entries(getHostNetworkInterfaces() ?? os.networkInterfaces())
+ 			// Omit interfaces with excluded names
+ 			.filter(([name]) => !excludeInterfaceNames.some((expression) => expression.test(name)))
+ 			// Flatten interface map to an array of addresses
+@@ -778,81 +858,7 @@ type NetworkInterface = {
  
  // Get all physical network interfaces with connection details
  export async function getNetworkInterfaces(umbreld?: Umbreld): Promise<NetworkInterface[]> {
@@ -4175,7 +4227,7 @@ index 3ccfcfd5..4eca19e3 100644
  }
  
  // Find an interface by MAC address
-@@ -936,100 +901,24 @@ export async function setStaticIp(
+@@ -936,100 +942,24 @@ export async function setStaticIp(
  	umbreld: Umbreld,
  	config: {mac: string; ip: string; subnetPrefix: number; gateway: string; dns: string[]},
  ) {
@@ -4280,7 +4332,7 @@ index 3ccfcfd5..4eca19e3 100644
  }
  
  // Wait for Pi system time to be synced for up to the number of seconds passed in.
-@@ -1058,41 +947,13 @@ export async function waitForSystemTime(umbreld: Umbreld, timeout: number): Prom
+@@ -1058,41 +988,13 @@ export async function waitForSystemTime(umbreld: Umbreld, timeout: number): Prom
  }
  
  export async function getHostname() {
